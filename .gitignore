@@ -1,0 +1,6 @@
+*.png 
+/jobs
+*.npz
+/logs
+/.mypy_cache
+/__pycache__

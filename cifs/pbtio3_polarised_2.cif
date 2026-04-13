@@ -1,0 +1,82 @@
+
+#(C) 2025 by FIZ Karlsruhe - Leibniz Institute for Information Infrastructure.  All rights reserved.
+data_35844-ICSD
+_database_code_ICSD 35844
+_audit_creation_date 2022-02-01
+_chemical_name_common 'Lead titanate'
+_chemical_formula_structural 'Pb Ti O3'
+_chemical_formula_sum 'O3 Pb1 Ti1'
+_chemical_name_structure_type PbTiO3-[P4mm]
+_exptl_crystal_density_diffrn 8.45
+_diffrn_ambient_temperature 778.
+_diffrn_ambient_pressure 6000000.
+_citation_title
+
+;
+High pressure single crystal X-ray and neutron powder diffraction study of the
+ferroelectric-paraelectric phase transition in PbTiO$_3$
+;
+loop_
+_citation_id
+_citation_journal_full
+_citation_year
+_citation_journal_volume
+_citation_page_first
+_citation_page_last
+_citation_journal_id_ASTM
+primary 'Journal of Physics D: Applied Physics' 2015 48 1 9 JPAPBE
+loop_
+_citation_author_citation_id
+_citation_author_name
+primary 'Al-Zein, A.'
+primary 'Bouvier, P.'
+primary 'Kania, A.'
+primary 'Levelut, C.'
+primary 'Hehlen, B.'
+primary 'Nassif, V.'
+primary 'Hansen, T.C.'
+primary 'Fertey, P.'
+primary 'Haines, J.'
+primary 'Rouquette, J.'
+_cell_length_a 3.8862(12)
+_cell_length_b 3.8862(12)
+_cell_length_c 3.9423(8)
+_cell_angle_alpha 90.
+_cell_angle_beta 90.
+_cell_angle_gamma 90.
+_cell_volume 59.54
+_cell_formula_units_Z 1
+_space_group_name_H-M_alt 'P 4 m m'
+_space_group_IT_number 99
+loop_
+_space_group_symop_id
+_space_group_symop_operation_xyz
+1 'y, -x, z'
+2 '-y, x, z'
+3 '-y, -x, z'
+4 'y, x, z'
+5 'x, -y, z'
+6 '-x, y, z'
+7 '-x, -y, z'
+8 'x, y, z'
+loop_
+_atom_type_symbol
+_atom_type_oxidation_number
+Pb2+ 2
+Ti4+ 4
+O2- -2
+loop_
+_atom_site_label
+_atom_site_type_symbol
+_atom_site_symmetry_multiplicity
+_atom_site_Wyckoff_symbol
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+_atom_site_B_iso_or_equiv
+_atom_site_occupancy
+Pb1 Pb2+ 1 a 0 0 0 0.90(9) 1.
+Ti1 Ti4+ 1 b 0.5 0.5 0.51(2) 0.6(3) 1.
+O1 O2- 1 b 0.5 0.5 0.072(9) 0.2(20) 1.
+O2 O2- 2 c 0.5 0 0.564(7) 0.2(30) 1.
+#End of TTdata_35844-ICSD
