@@ -1,20 +1,36 @@
 """
-Disk Intensity Polarisation Mapping — Boracite
+Tilt-Split Simulation for BTO Asymmetry Analysis
 
-Runs a 1D tilt sweep over a narrow range around the zone axis, measuring
-disk intensity asymmetry as a function of beam tilt. All 41 tilts run in a
-single job.
+Runs a subset of tilt angles from the full X-point sweep, designed to be
+submitted as a SLURM array job where each task handles a small number of
+tilt angles within the 24-hour cluster time limit.
+
+All simulation settings (grid points, scan pixels, phonon configs, supercell)
+are identical to non-batch_intensity_asymmetry_calc.py.
+
+Usage:
+    python tilt_split_sim.py --task_id INT [--tilts_per_job INT] [--run_id STR]
+
+Arguments:
+    --task_id INT       SLURM array task ID (0-indexed). Determines which tilt
+                        angles this job processes.
+    --tilts_per_job INT Number of tilt angles per job (default: 1).
+    --run_id STR        Shared identifier for this run, used to name the output
+                        directory so all tasks write to the same place. Defaults
+                        to SLURM_ARRAY_JOB_ID if available, else a timestamp.
 
 Output:
-    /leonardo_work/EUHPC_E06_088/fhardy00/cbed_simulations/boracite_disk_intensity_sweeps/
-        boracite_disk_intensity_job{run_id}/
-            results.npz
-            sim_images/
-            sim_images_boxes/
+    simulation_output/BTO_asymmetry_sweeps/
+        BTO_tilt_split_job{run_id}/
+            partial_results/
+                tilt_task_000.npz      # one file per task
+                sim_images/            # diffraction pattern PNGs
+                sim_images_boxes/      # patterns with box overlays
             parameters.txt
 """
 
 import os
+import sys
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
@@ -26,7 +42,7 @@ from ase import Atoms
 import abtem
 
 # ============================================================================
-# CONFIGURATION PARAMETERS
+# CONFIGURATION PARAMETERS  (match non-batch_intensity_asymmetry_calc.py)
 # ============================================================================
 
 structure_file_dict = {
@@ -38,32 +54,22 @@ structure_file_dict = {
 CROP_XY_SIZE = None
 
 BEAM_ENERGY = 300e3          # eV
-CONVERGENCE_ANGLE = 0.8      # mrad  — beam parameter, sets disk size
+CONVERGENCE_ANGLE = 0.8      # mrad
 SLICE_THICKNESS = 1.0        # Angstroms
-GRID_POINTS = 1024       # 4096
+GRID_POINTS = 1024 * 4       # 4096
 
-SCAN_PIXELS_X = 2
-SCAN_PIXELS_Y = 2
+SCAN_PIXELS_X = 4
+SCAN_PIXELS_Y = 4
 
 GAMMA = 0.3
 PERCENTILE_MIN = 0.5
 PERCENTILE_MAX = 99.8
 
-# Tilt sweep definition
-TILT_Y_MIN = -0.05  # degrees
-TILT_Y_MAX =  0.05  # degrees
+# Full tilt sweep definition — must match non-batch script so indices align
+TILT_Y_MIN = -0.6   # degrees
+TILT_Y_MAX =  0.6   # degrees
 TILT_Y_NPTS = 41
-TILT_X_FIXED = 0.0  # degrees
-
-# Material
-structure_name     = 'boracite'
-supercell_size     = (7, 7, 40)
-num_phonons        = 10
-# Detector limit set to the disk angular radius (= CONVERGENCE_ANGLE numerically,
-# but this is a detector parameter — the collected scattering angle — not the beam angle).
-DISK_DETECTOR_MAX_ANGLE = 35  # mrad
-score_type         = 'com'
-base_output_dir    = '/leonardo_work/EUHPC_E06_088/fhardy00/cbed_simulations/boracite_disk_intensity_sweeps'
+TILT_X_FIXED = 0.0  # degrees (1D sweep in Y only)
 
 # ============================================================================
 # GPU CONFIGURATION
@@ -88,10 +94,16 @@ except Exception as e:
     abtem.config.set({'device': 'cpu'})
 
 # ============================================================================
-# ASYMMETRY CALCULATION FUNCTIONS
+# ASYMMETRY CALCULATION FUNCTIONS  (unchanged from non-batch script)
 # ============================================================================
 
 def calculate_box_asymmetry_score(diffraction_pattern, box1_coords, box2_coords):
+    """
+    Calculate asymmetry score using masked center of mass approach.
+
+    The y-displacement of the COM midpoint from the pattern centre is used as
+    the asymmetry metric.
+    """
     from scipy.ndimage import center_of_mass
 
     if hasattr(diffraction_pattern, 'array'):
@@ -212,44 +224,88 @@ def adjust_boxes_for_tilt(box1, box2, tilt_x_deg, tilt_y_deg, pattern_shape,
 # MAIN SIMULATION FUNCTION
 # ============================================================================
 
-def run_disk_intensity_sweep(run_dir, box_pairs_dict):
-    sim_images_dir = os.path.join(run_dir, 'sim_images')
-    sim_images_boxes_dir = os.path.join(run_dir, 'sim_images_boxes')
-    for d in (run_dir, sim_images_dir, sim_images_boxes_dir):
+def run_tilt_subset(
+    task_id,
+    tilts_per_job,
+    run_dir,
+    structure_name,
+    supercell_size,
+    detector_max_angle,
+    box_pairs_dict,
+    num_phonons,
+    score_type='com',
+):
+    """
+    Run simulations for the tilt-angle subset assigned to this task.
+
+    Saves one partial NPZ to run_dir/partial_results/tilt_task_{task_id:03d}.npz
+    and diffraction-pattern images under run_dir/partial_results/sim_images[_boxes]/.
+    A checkpoint NPZ is written after every tilt so progress survives a job kill.
+    """
+    # ---- Set up directories ------------------------------------------------
+    partial_dir = os.path.join(run_dir, 'partial_results')
+    sim_images_dir = os.path.join(partial_dir, 'sim_images')
+    sim_images_boxes_dir = os.path.join(partial_dir, 'sim_images_boxes')
+    for d in (partial_dir, sim_images_dir, sim_images_boxes_dir):
         os.makedirs(d, exist_ok=True)
 
+    # ---- Resolve which tilt-Y values this task owns ------------------------
     all_tilt_y = np.linspace(TILT_Y_MIN, TILT_Y_MAX, TILT_Y_NPTS)
-    n_tilts = len(all_tilt_y)
+    start_idx = task_id * tilts_per_job
+    end_idx   = min(start_idx + tilts_per_job, TILT_Y_NPTS)
+
+    if start_idx >= TILT_Y_NPTS:
+        print(f"Task {task_id}: start_idx={start_idx} >= TILT_Y_NPTS={TILT_Y_NPTS}. Nothing to do.")
+        return
+
+    tilt_y_subset = all_tilt_y[start_idx:end_idx]
+    global_indices = np.arange(start_idx, end_idx)
+    n_tilts = len(tilt_y_subset)
+    tilt_x_values = np.array([TILT_X_FIXED])
 
     print("=" * 70)
-    print(f"DISK INTENSITY SWEEP  |  {structure_name}")
-    print(f"  Tilt-Y range : {TILT_Y_MIN} to {TILT_Y_MAX} deg  ({n_tilts} pts)")
-    print(f"  Grid pts     : {GRID_POINTS}  |  Scan: {SCAN_PIXELS_X}x{SCAN_PIXELS_Y}  |  Phonons: {num_phonons}")
-    print(f"  Disk detector: {DISK_DETECTOR_MAX_ANGLE} mrad")
-    print(f"  Output       : {run_dir}")
+    print(f"TILT-SPLIT SIMULATION  |  task {task_id}  |  tilts {start_idx}–{end_idx - 1}")
+    print(f"  Structure : {structure_name}")
+    print(f"  Tilt-Y    : {tilt_y_subset}")
+    print(f"  Grid pts  : {GRID_POINTS}  |  Scan: {SCAN_PIXELS_X}x{SCAN_PIXELS_Y}  |  Phonons: {num_phonons}")
+    print(f"  Output    : {run_dir}")
     print("=" * 70)
 
     # ---- Material setup ----------------------------------------------------
-    ZONE_AXIS = [1, 1, 0]
-    THERMAL_SIGMA = 0.1
+    if structure_name == 'boracite':
+        ZONE_AXIS = [1, 1, 0]
+    else:
+        ZONE_AXIS = [1, 0, 0]
 
-    # ---- Build base supercell ----------------------------------------------
+    if structure_name == 'PTO':
+        THERMAL_SIGMA = {"Pb": 0.1068, "Ti": 0.0872, "O": 0.0503}
+    elif structure_name == 'BTO':
+        THERMAL_SIGMA = {"Ba": 0.0785, "Ti": 0.0703, "O": 0.0656}
+    else:
+        THERMAL_SIGMA = 0.1
+
+    # ---- Build base supercell (once per task) ------------------------------
     atoms = read(structure_file_dict[structure_name])
     base_rotated_atoms = atoms.copy()
 
-    zone_vector = np.array(ZONE_AXIS, dtype=float)
-    zone_vector = zone_vector / np.linalg.norm(zone_vector)
-    z_vector = np.array([0., 0., 1.])
-    rotation_axis = np.cross(zone_vector, z_vector)
-    if np.linalg.norm(rotation_axis) > 1e-6:
-        rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
-        angle = np.arccos(np.clip(np.dot(zone_vector, z_vector), -1.0, 1.0))
-        base_rotated_atoms.rotate(np.degrees(angle), rotation_axis,
-                                  center='COP', rotate_cell=True)
+    if ZONE_AXIS != [0, 0, 1]:
+        zone_vector = np.array(ZONE_AXIS, dtype=float)
+        zone_vector = zone_vector / np.linalg.norm(zone_vector)
+        z_vector = np.array([0., 0., 1.])
+        rotation_axis = np.cross(zone_vector, z_vector)
+        if np.linalg.norm(rotation_axis) > 1e-6:
+            rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
+            angle = np.arccos(np.clip(np.dot(zone_vector, z_vector), -1.0, 1.0))
+            base_rotated_atoms.rotate(np.degrees(angle), rotation_axis,
+                                      center='COP', rotate_cell=True)
 
     base_rotated_atoms = abtem.orthogonalize_cell(base_rotated_atoms)
     base_supercell = base_rotated_atoms * supercell_size
-    base_supercell.rotate(-45, 'z', center='COP', rotate_cell=True)
+
+    if structure_name == 'boracite':
+        base_supercell.rotate(-45, 'z', center='COP', rotate_cell=True)
+    if structure_name == 'PTO':
+        base_supercell.rotate(-90, 'z', center='COP', rotate_cell=True)
 
     if CROP_XY_SIZE is not None:
         cell_lengths = base_supercell.get_cell().lengths()
@@ -276,22 +332,22 @@ def run_disk_intensity_sweep(run_dir, box_pairs_dict):
     print(f"Supercell built: {supercell_size}, {len(base_supercell)} atoms, "
           f"cell={base_supercell.get_cell().lengths()}")
 
-    # ---- Storage arrays ----------------------------------------------------
+    # ---- Storage arrays for this task's results ----------------------------
     label_keys = list(box_pairs_dict.keys())
-    diffraction_images = [None] * n_tilts
-    asymmetry_grids    = {k: np.full(n_tilts, np.nan) for k in label_keys}
-    intensity_grids    = {k: np.full(n_tilts, np.nan) for k in label_keys}
-    com_grids          = {k: np.full(n_tilts, np.nan) for k in label_keys}
-    box_coords_box1    = {k: np.zeros((n_tilts, 4), dtype=int) for k in label_keys}
-    box_coords_box2    = {k: np.zeros((n_tilts, 4), dtype=int) for k in label_keys}
+    diffraction_images   = [None] * n_tilts
+    asymmetry_grids      = {k: np.full(n_tilts, np.nan) for k in label_keys}
+    intensity_grids      = {k: np.full(n_tilts, np.nan) for k in label_keys}
+    com_grids            = {k: np.full(n_tilts, np.nan) for k in label_keys}
+    box_coords_box1      = {k: np.zeros((n_tilts, 4), dtype=int) for k in label_keys}
+    box_coords_box2      = {k: np.zeros((n_tilts, 4), dtype=int) for k in label_keys}
     _img_shape = None
 
-    results_npz = os.path.join(run_dir, 'results.npz')
+    partial_npz = os.path.join(partial_dir, f'tilt_task_{task_id:03d}.npz')
 
-    # ---- Loop over tilt angles ---------------------------------------------
-    for j, tilt_y in enumerate(all_tilt_y):
+    # ---- Loop over assigned tilt angles ------------------------------------
+    for local_j, (global_j, tilt_y) in enumerate(zip(global_indices, tilt_y_subset)):
         tilt_x = TILT_X_FIXED
-        print(f"\n  [{j + 1}/{n_tilts}] tilt_y={tilt_y:.4f}°")
+        print(f"\n  [{local_j + 1}/{n_tilts}] tilt_y={tilt_y:.4f}° (global idx {global_j})")
 
         try:
             tilted_supercell = base_supercell.copy()
@@ -311,6 +367,7 @@ def run_disk_intensity_sweep(run_dir, box_pairs_dict):
                 projection='finite',
             )
 
+            # Ensure square extent
             extent_x, extent_y = potential.extent
             if abs(extent_x - extent_y) > 0.1:
                 potential = abtem.Potential(
@@ -339,23 +396,17 @@ def run_disk_intensity_sweep(run_dir, box_pairs_dict):
                 scan=scan,
                 potential=potential,
                 detectors=abtem.PixelatedDetector(
-                    max_angle=DISK_DETECTOR_MAX_ANGLE,
+                    max_angle=detector_max_angle,
                     reciprocal_space=True,
                 ),
             )
             result = fourd_stem.compute(progress_bar=False)
             diffraction_pattern = np.array(result.array).mean(axis=(0, 1))
-
-            # Free GPU memory pool after each tilt to prevent VRAM exhaustion
-            try:
-                cp.get_default_memory_pool().free_all_blocks()
-                cp.get_default_pinned_memory_pool().free_all_blocks()
-            except Exception:
-                pass
-            diffraction_images[j] = np.array(diffraction_pattern)
+            diffraction_images[local_j] = np.array(diffraction_pattern)
             if _img_shape is None:
                 _img_shape = diffraction_pattern.shape
 
+            # Save plain image
             img_filename = f"tilt_x_{tilt_x:.3f}_y_{tilt_y:.3f}.png"
             vmin = np.percentile(diffraction_pattern, PERCENTILE_MIN)
             vmax_img = np.percentile(diffraction_pattern, PERCENTILE_MAX)
@@ -370,6 +421,7 @@ def run_disk_intensity_sweep(run_dir, box_pairs_dict):
             plt.savefig(os.path.join(sim_images_dir, img_filename), dpi=150, bbox_inches='tight')
             plt.close(fig)
 
+            # Box analysis + annotated image
             pattern_shape = diffraction_pattern.shape
             max_angle_mrad = result.max_angles
 
@@ -395,14 +447,14 @@ def run_disk_intensity_sweep(run_dir, box_pairs_dict):
                     diffraction_pattern, box1_coords, box2_coords
                 )
 
-                intensity_grids[label][j] = box_result['intensity_asymmetry']
-                com_grids[label][j]        = box_result['com_y_displacement']
+                intensity_grids[label][local_j] = box_result['intensity_asymmetry']
+                com_grids[label][local_j]        = box_result['com_y_displacement']
 
                 recorded = (box_result['intensity_asymmetry'] if score_type == 'intensity'
                             else box_result['com_y_displacement'])
-                asymmetry_grids[label][j]  = recorded
-                box_coords_box1[label][j]  = box_result['box1_coords']
-                box_coords_box2[label][j]  = box_result['box2_coords']
+                asymmetry_grids[label][local_j]     = recorded
+                box_coords_box1[label][local_j]     = box_result['box1_coords']
+                box_coords_box2[label][local_j]     = box_result['box2_coords']
 
                 y1_min, y1_max, x1_min, x1_max = box_result['box1_coords']
                 y2_min, y2_max, x2_min, x2_max = box_result['box2_coords']
@@ -428,19 +480,26 @@ def run_disk_intensity_sweep(run_dir, box_pairs_dict):
         except Exception as e:
             print(f"    ERROR at tilt_y={tilt_y:.4f}: {e}")
 
-        # Checkpoint after each tilt
-        _save_npz(results_npz, all_tilt_y, diffraction_images,
-                  asymmetry_grids, intensity_grids, com_grids,
-                  box_coords_box1, box_coords_box2, _img_shape)
-        print(f"    Checkpoint saved -> {results_npz}")
+        # ---- Checkpoint save after every tilt --------------------------------
+        _save_partial_npz(
+            partial_npz, task_id, tilts_per_job,
+            tilt_x_values, tilt_y_subset, global_indices,
+            diffraction_images, asymmetry_grids, intensity_grids,
+            com_grids, box_coords_box1, box_coords_box2, _img_shape,
+        )
+        print(f"    Checkpoint saved -> {partial_npz}")
 
-    print(f"\nSweep complete. Results: {results_npz}")
+    print(f"\nTask {task_id} complete. Final NPZ: {partial_npz}")
 
 
-def _save_npz(path, tilt_y_values, diffraction_images,
-              asymmetry_grids, intensity_grids, com_grids,
-              box_coords_box1, box_coords_box2, img_shape):
-    n = len(tilt_y_values)
+def _save_partial_npz(
+    path, task_id, tilts_per_job,
+    tilt_x_values, tilt_y_subset, global_indices,
+    diffraction_images, asymmetry_grids, intensity_grids,
+    com_grids, box_coords_box1, box_coords_box2, img_shape,
+):
+    """Assemble arrays and write the partial NPZ for this task."""
+    n = len(tilt_y_subset)
 
     if img_shape is not None:
         img_array = np.zeros((n,) + img_shape)
@@ -453,16 +512,19 @@ def _save_npz(path, tilt_y_values, diffraction_images,
         img_array = np.array([])
 
     save_dict = dict(
-        tilt_y_values=tilt_y_values,
-        tilt_x_fixed=np.array(TILT_X_FIXED),
+        task_id=np.array(task_id),
+        tilts_per_job=np.array(tilts_per_job),
+        tilt_x_values=tilt_x_values,
+        tilt_y_values=tilt_y_subset,
+        global_tilt_indices=global_indices,
         diffraction_images=img_array,
     )
     for label in asymmetry_grids:
-        save_dict[f'{label}']                     = asymmetry_grids[label]
-        save_dict[f'{label}_intensity_asymmetry'] = intensity_grids[label]
-        save_dict[f'{label}_com_y_displacement']  = com_grids[label]
-        save_dict[f'{label}_box1_coords']         = box_coords_box1[label]
-        save_dict[f'{label}_box2_coords']         = box_coords_box2[label]
+        save_dict[f'{label}']                      = asymmetry_grids[label]
+        save_dict[f'{label}_intensity_asymmetry']  = intensity_grids[label]
+        save_dict[f'{label}_com_y_displacement']   = com_grids[label]
+        save_dict[f'{label}_box1_coords']          = box_coords_box1[label]
+        save_dict[f'{label}_box2_coords']          = box_coords_box2[label]
 
     np.savez(path, **save_dict)
 
@@ -472,41 +534,94 @@ def _save_npz(path, tilt_y_values, diffraction_images,
 # ============================================================================
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Disk intensity polarisation mapping — boracite.')
-    parser.add_argument('--run_id', type=str, default=None,
-                        help='Run identifier. Defaults to SLURM_JOB_ID or a timestamp.')
+    parser = argparse.ArgumentParser(description='Run a tilt-angle subset for BTO asymmetry analysis.')
+    parser.add_argument('--task_id',      type=int, required=True,
+                        help='SLURM array task ID (0-indexed).')
+    parser.add_argument('--tilts_per_job', type=int, default=1,
+                        help='Number of tilt angles per job (default: 1).')
+    parser.add_argument('--run_id',       type=str, default=None,
+                        help='Shared run identifier (use $SLURM_ARRAY_JOB_ID). '
+                             'Defaults to SLURM_ARRAY_JOB_ID env var or a timestamp.')
     args = parser.parse_args()
 
+    # Resolve run_id
     if args.run_id is None:
         args.run_id = os.environ.get(
-            'SLURM_JOB_ID',
+            'SLURM_ARRAY_JOB_ID',
             datetime.now().strftime('%Y%m%d_%H%M%S'),
         )
 
-    # ---- Box coordinates (update as needed for disk region) ----------------
-    disk_box1 = ((200 * 4, 350 * 4), (497 * 4, 527 * 4))
-    disk_box2 = ((674 * 4, 824 * 4), (497 * 4, 527 * 4))
-    box_pairs = {'horizontal_boxes': (disk_box1, disk_box2)}
+    # ---- Box coordinates (match non-batch_intensity_asymmetry_calc.py) -----
+    kikuchi_box1 = ((200 * 4, 350 * 4), (497 * 4, 527 * 4))
+    kikuchi_box2 = ((674 * 4, 824 * 4), (497 * 4, 527 * 4))
+    kikuchi_box_pairs = {'horizontal_boxes': (kikuchi_box1, kikuchi_box2)}
 
-    run_dir = os.path.join(base_output_dir, f'boracite_disk_intensity_job{args.run_id}')
+    # ---- Active material: BTO ----------------------------------------------
+    # To switch material, comment out the BTO block and uncomment the desired one.
+
+    # structure_name    = 'BTO'
+    # supercell_size    = (30, 30, 154)
+    # num_phonons       = 40
+    # detector_max_angle = 'full'
+    # score_type        = 'com'
+    # box_pairs         = kikuchi_box_pairs
+    # base_output_dir   = 'simulation_output/BTO_asymmetry_sweeps'
+
+    # ---- PTO (commented out for future use) --------------------------------
+    # structure_name    = 'PTO'
+    # supercell_size    = (30, 30, 154)
+    # num_phonons       = 40
+    # detector_max_angle = 'full'
+    # score_type        = 'com'
+    # box_pairs         = kikuchi_box_pairs
+    # base_output_dir   = 'simulation_output/PTO_asymmetry_sweeps'
+
+    # ---- Boracite (commented out for future use) ---------------------------
+    structure_name    = 'boracite'
+    supercell_size    = (7, 7, 40)
+    num_phonons       = 40
+    detector_max_angle = 'full'
+    score_type        = 'com'
+    box_pairs         = kikuchi_box_pairs
+    base_output_dir   = 'simulation_output/boracite_asymmetry_sweeps'
+
+    # ---- Build output directory (shared across all tasks in this array) ----
+    run_dir = os.path.join(
+        base_output_dir,
+        f'{structure_name}_tilt_split_job{args.run_id}',
+    )
     os.makedirs(run_dir, exist_ok=True)
 
-    with open(os.path.join(run_dir, 'parameters.txt'), 'w') as f:
-        f.write("Disk Intensity Polarisation Mapping Parameters\n")
-        f.write("=" * 60 + "\n")
-        f.write(f"Structure       : {structure_name}\n")
-        f.write(f"Supercell       : {supercell_size}\n")
-        f.write(f"Grid points     : {GRID_POINTS}\n")
-        f.write(f"Scan pixels     : {SCAN_PIXELS_X}x{SCAN_PIXELS_Y}\n")
-        f.write(f"Beam energy     : {BEAM_ENERGY} eV\n")
-        f.write(f"Conv. angle     : {CONVERGENCE_ANGLE} mrad\n")
-        f.write(f"Disk detector   : {DISK_DETECTOR_MAX_ANGLE} mrad\n")
-        f.write(f"Slice thick.    : {SLICE_THICKNESS} A\n")
-        f.write(f"Num phonons     : {num_phonons}\n")
-        f.write(f"Score type      : {score_type}\n")
-        f.write(f"Tilt Y range    : {TILT_Y_MIN} to {TILT_Y_MAX} deg\n")
-        f.write(f"Tilt Y points   : {TILT_Y_NPTS}\n")
-        f.write(f"Tilt X fixed    : {TILT_X_FIXED} deg\n")
-        f.write(f"Run ID          : {args.run_id}\n")
+    # Write parameters.txt — all tasks produce identical content so concurrent
+    # writes are safe; no existence check needed (avoids TOCTOU race).
+    params_file = os.path.join(run_dir, 'parameters.txt')
+    with open(params_file, 'w') as f:
+            f.write("Tilt-Split Simulation Parameters\n")
+            f.write("=" * 60 + "\n")
+            f.write(f"Structure     : {structure_name}\n")
+            f.write(f"Supercell     : {supercell_size}\n")
+            f.write(f"Grid points   : {GRID_POINTS}\n")
+            f.write(f"Scan pixels   : {SCAN_PIXELS_X}x{SCAN_PIXELS_Y}\n")
+            f.write(f"Beam energy   : {BEAM_ENERGY} eV\n")
+            f.write(f"Conv. angle   : {CONVERGENCE_ANGLE} mrad\n")
+            f.write(f"Detector angle: {detector_max_angle}\n")
+            f.write(f"Slice thick.  : {SLICE_THICKNESS} A\n")
+            f.write(f"Num phonons   : {num_phonons}\n")
+            f.write(f"Score type    : {score_type}\n")
+            f.write(f"Tilt Y range  : {TILT_Y_MIN} to {TILT_Y_MAX} deg\n")
+            f.write(f"Tilt Y points : {TILT_Y_NPTS}\n")
+            f.write(f"Tilt X fixed  : {TILT_X_FIXED} deg\n")
+            f.write(f"Tilts per job : {args.tilts_per_job}\n")
+            f.write(f"Run ID        : {args.run_id}\n")
 
-    run_disk_intensity_sweep(run_dir, box_pairs)
+    run_tilt_subset(
+        task_id=args.task_id,
+        tilts_per_job=args.tilts_per_job,
+        run_dir=run_dir,
+        structure_name=structure_name,
+        supercell_size=supercell_size,
+        detector_max_angle=detector_max_angle,
+        box_pairs_dict=box_pairs,
+        num_phonons=num_phonons,
+        score_type=score_type,
+    )

@@ -1,0 +1,92 @@
+# Paper style: Avenir (fallback Figtree) + muted palette on white.
+# Use: plt.style.use("paper")
+# Zero/reference lines: always black.
+
+## ── Fonts ────────────────────────────────────────────────────────────────────
+font.family      : sans-serif
+font.sans-serif  : Avenir, Avenir Next, Figtree, Nunito Sans, DejaVu Sans
+# mathtext takes ONE font (no fallback list): swap Figtree -> Avenir below once installed
+mathtext.fontset : custom
+mathtext.rm      : Figtree
+mathtext.it      : Figtree:italic
+mathtext.bf      : Figtree:bold
+mathtext.sf      : Figtree
+mathtext.cal     : Figtree:italic
+mathtext.fallback: cm
+
+font.size        : 8
+axes.labelsize   : 8
+axes.titlesize   : 8
+xtick.labelsize  : 7
+ytick.labelsize  : 7
+legend.fontsize  : 6.5
+
+## ── Colours: muted hue families, light -> dark ─────────────────────────────
+#
+# navy    8f98b2  616d93  344274  071855
+# grey    d2d2d0  9a9a96
+# green   b2bfb0  557250      olive  c0c09c  82823e
+# teal    a1b6b8  698b8b  345f60
+# purple  baaecf  664d95
+# orange  f4d9c7  ecbc9c  e5a174  f0ac95      ochre  b99247
+# red     cca9a8  91413e
+#
+# Cycle = the darkest shade of each family, most distinct first.
+axes.prop_cycle : cycler('color', ['071855', 'e5a174', '557250', '664d95', '91413e', '345f60', 'b99247', '9a9a96'])
+
+text.color       : black
+axes.labelcolor  : black
+axes.edgecolor   : black
+xtick.color      : black
+ytick.color      : black
+xtick.labelcolor : black
+ytick.labelcolor : black
+grid.color       : d2d2d0
+legend.labelcolor: black
+figure.facecolor : white
+axes.facecolor   : white
+savefig.facecolor: white
+image.cmap       : inferno
+image.interpolation : nearest
+
+## ── Lines, ticks, axes ──────────────────────────────────────────────────────
+axes.linewidth    : 0.6
+xtick.major.width : 0.6
+ytick.major.width : 0.6
+xtick.minor.width : 0.45
+ytick.minor.width : 0.45
+xtick.direction   : in
+ytick.direction   : in
+xtick.top         : True
+ytick.right       : True
+xtick.minor.visible : True
+ytick.minor.visible : True
+lines.linewidth   : 1.0
+errorbar.capsize  : 2
+
+# ×10ⁿ in maths font, only outside 1e-3 .. 1e4
+axes.formatter.use_mathtext : True
+axes.formatter.limits       : -3, 4
+
+## ── Legend ──────────────────────────────────────────────────────────────────
+legend.frameon      : False
+legend.handlelength : 1.5
+legend.handletextpad: 0.5
+legend.borderpad    : 0.3
+legend.labelspacing : 0.25
+legend.borderaxespad: 0.45
+
+## ── Layout ──────────────────────────────────────────────────────────────────
+# double column, 183 x 120 mm
+figure.figsize               : 7.2, 4.72
+figure.constrained_layout.use: True
+
+## ── Output ──────────────────────────────────────────────────────────────────
+figure.dpi     : 150
+savefig.dpi    : 600
+savefig.bbox   : tight
+savefig.format : pdf
+savefig.transparent : True
+pdf.fonttype   : 42
+ps.fonttype    : 42
+svg.fonttype   : none

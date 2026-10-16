@@ -1,0 +1,8 @@
+abtem==1.0.8
+ase>=3.27
+numpy
+scipy
+matplotlib>=3.10
+dask
+jupyter
+# GPU simulations: cupy-cuda12x
